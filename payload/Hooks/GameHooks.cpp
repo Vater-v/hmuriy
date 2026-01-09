@@ -12,7 +12,7 @@ void ExecuteGameAction(const std::string& action) {
     LOGD("GameHooks [STUB]: Received command to execute -> '%s'", action.c_str());
     
     if (action == "test_ping") {
-        NetworkClient::Instance().SendToast("Pong! 🏓");
+        NetworkClient::Instance().SendHint("Pong! 🏓");
     }
     
     // Тут ты будешь писать новую логику:

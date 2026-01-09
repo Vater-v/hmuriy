@@ -12,7 +12,6 @@ add_library(
 	SHARED
 	main.cpp
 	Game/GameConfig.h
-	Game/Il2Cpp.h
 	Hooks/GameHooks.cpp
 	Logic/CommandManager.cpp
 	Network/Client.cpp

@@ -1,0 +1,3 @@
+C:/valera/hmuriy/payload/build/CMakeFiles/hmuriy.dir
+C:/valera/hmuriy/payload/build/CMakeFiles/edit_cache.dir
+C:/valera/hmuriy/payload/build/CMakeFiles/rebuild_cache.dir
