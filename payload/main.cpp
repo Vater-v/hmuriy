@@ -22,14 +22,6 @@ void* init_thread(void*) {
     // 2. Ставим хуки (Вся магия теперь там)
     GameHooks::Install(il2cpp_base);
 
-    while (true) {
-    std::string action = CommandManager::Instance().ProcessQueue();
-    if (!action.empty()) {
-        ExecuteGameAction(action); // Временно вызываем напрямую, так как GameHooks::Install пуст
-    }
-    usleep(50000); // 20 раз в секунду
-}
-
     // 3. Сообщаем серверу
     NetworkClient::Instance().SendToast("Hmuriy injected successfully 💉");
     
