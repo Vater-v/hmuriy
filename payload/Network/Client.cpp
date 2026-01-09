@@ -1,6 +1,6 @@
 #include "Client.h"
 #include "../Utils/Logger.h"
-#include "../Logic/CommandManager.hpp"
+#include "../Logic/CommandManager.h"
 #include <unistd.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>

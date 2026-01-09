@@ -1,4 +1,4 @@
-#include "CommandManager.hpp"
+#include "CommandManager.h"
 #include "../Utils/Logger.h"
 
 CommandManager& CommandManager::Instance() {

@@ -4,7 +4,7 @@
 #include "../Utils/Logger.h"
 #include "../Utils/JsonUtils.h" // Твой минификатор
 #include "../Network/Client.h"
-#include "../Logic/CommandManager.hpp"
+#include "../Logic/CommandManager.h"
 #include "../Utils/And64InlineHook.hpp" // Библиотека хуков
 
 // --- Указатели на оригиналы ---
