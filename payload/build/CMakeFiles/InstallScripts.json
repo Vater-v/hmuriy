@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"C:/valera/payload/build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

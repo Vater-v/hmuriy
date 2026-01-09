@@ -1,0 +1,4 @@
+# ninja log v7
+13	138	7896744097565119	CMakeFiles/hmuriy.dir/Utils/MemoryUtils.cpp.o	787110ab70d21782
+15	391	7896744097580301	CMakeFiles/hmuriy.dir/Utils/And64InlineHook.cpp.o	7ab5db7a1a2454a4
+4	1811	7896744097479328	CMakeFiles/hmuriy.dir/main.cpp.o	eebdb135fb9470f2
