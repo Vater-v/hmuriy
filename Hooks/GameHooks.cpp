@@ -7,39 +7,47 @@
 #include "../Game/GameConfig.h"
 
 #include <string>
-#include <vector>
-#include <codecvt>
-#include <locale>
+#include <sstream>
+#include <iomanip> // Для std::put_time, std::setw
+#include <chrono>  // Для времени
+#include <ctime>   // Для gmtime
+#include <dlfcn.h> // Для dlsym
 
 // =============================================================
-// ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ (Состояние игры)
+// ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
 // =============================================================
 
-// Здесь храним "украденный" указатель на контроллер стаканчика
 void* g_CupControllerInstance = nullptr;
+void* g_SocketBusInstance = nullptr;    
 
 // =============================================================
 // ОПРЕДЕЛЕНИЕ ТИПОВ ФУНКЦИЙ
 // =============================================================
 
-// --- Стандартные Unity ---
+// --- Unity ---
 void (*orig_Update)(void* instance);
 void* (*orig_SerializeObject)(void* value);
 void* (*orig_DeserializeObject)(void* str, void* type, void* settings);
 
-// --- Игровые (Backgammon) ---
-
-// Конструктор: public RollDicesOnCupThrowController(Board board, RollDiceCommand cmd)
-// void* instance - это "this"
+// --- Backgammon ---
 typedef void (*CupController_Ctor_t)(void* instance, void* board, void* cmd);
 CupController_Ctor_t orig_CupController_Ctor = nullptr;
-
-// Метод броска: private void RollDices()
 typedef void (*CupController_Roll_t)(void* instance);
-CupController_Roll_t func_CupController_Roll = nullptr; // Не хукаем, просто сохраняем адрес
+CupController_Roll_t func_CupController_Roll = nullptr;
+
+// --- Network ---
+typedef void (*SocketBus_Ctor_t)(void* instance, void* webSocket, void* queue, void* signal, bool log);
+SocketBus_Ctor_t orig_SocketBus_Ctor = nullptr;
+
+typedef void* (*WebSocket_SendText_t)(void* instance, void* message);
+WebSocket_SendText_t func_SendText = nullptr;
+
+// il2cpp string creation
+typedef void* (*il2cpp_string_new_t)(const char* str);
+il2cpp_string_new_t func_il2cpp_string_new = nullptr;
 
 // =============================================================
-// ВСПОМОГАТЕЛЬНЫЕ СТРУКТУРЫ И ФУНКЦИИ
+// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 // =============================================================
 
 struct Il2CppString {
@@ -52,130 +60,184 @@ struct Il2CppString {
 std::string ReadIl2CppString(void* ptr) {
     if (!ptr) return "";
     Il2CppString* il2cppStr = (Il2CppString*)ptr;
-    int32_t len = il2cppStr->length;
-    if (len <= 0) return "";
-    if (len > 500000) return ""; 
-
-    try {
-        std::u16string u16str(il2cppStr->chars, len);
-        std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t> convert;
-        return convert.to_bytes(u16str);
-    } catch (...) {
-        return "";
+    if (il2cppStr->length <= 0) return "";
+    
+    std::string s;
+    for(int i=0; i<il2cppStr->length; i++) {
+        s += (char)il2cppStr->chars[i];
     }
+    return s;
 }
 
-void LogTraffic(const char* prefix, const std::string& msg) {
-    const size_t CHUNK_SIZE = 3500;
-    size_t length = msg.length();
-    if (length == 0) return;
-
-    LOGI("%s [LEN: %zu] >>>", prefix, length);
-    for (size_t i = 0; i < length; i += CHUNK_SIZE) {
-        std::string chunk = msg.substr(i, CHUNK_SIZE);
-        LOGD("%s: %s", prefix, chunk.c_str());
+void* CreateIl2CppString(const char* str) {
+    if (func_il2cpp_string_new) {
+        return func_il2cpp_string_new(str);
     }
-    LOGI("%s <<< END", prefix);
+    return nullptr;
 }
 
-// Функция для принудительного броска
-void ForceGameRoll() {
-    // 1. Проверяем, перехватили ли мы уже контроллер
-    if (g_CupControllerInstance == nullptr) {
-        LOGE("GameHooks: Cannot roll! CupController instance not found yet. (Wait for match start)");
-        NetworkClient::Instance().SendToast("Error: Wait for game start!");
+// Генерация времени в формате: 2026-01-10T13:43:35.630385Z
+std::string GetCurrentTimeISO8601() {
+    using namespace std::chrono;
+    
+    // Получаем текущее время
+    auto now = system_clock::now();
+    auto now_c = system_clock::to_time_t(now);
+    
+    // Вычисляем микросекунды
+    auto duration = now.time_since_epoch();
+    auto micros = duration_cast<microseconds>(duration) % 1000000;
+
+    // Конвертируем в структуру времени (UTC)
+    std::tm tm_buf;
+    gmtime_r(&now_c, &tm_buf); // gmtime_r потокобезопасна
+
+    char buffer[32];
+    // Форматируем дату и время до секунд
+    std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%S", &tm_buf);
+
+    // Собираем полную строку с микросекундами и Z
+    std::stringstream ss;
+    ss << buffer << "." << std::setfill('0') << std::setw(6) << micros.count() << "Z";
+    
+    return ss.str();
+}
+
+// =============================================================
+// ЛОГИКА ОТПРАВКИ JSON
+// =============================================================
+
+void SendDirectJson(const char* innerPayload) {
+    // 1. Проверки
+    if (g_SocketBusInstance == nullptr) {
+        LOGE("SendDirectJson: No SocketBus instance! (Wait for game connection)");
+        NetworkClient::Instance().SendToast("Error: No SocketBus!");
+        return;
+    }
+    if (func_SendText == nullptr) {
+        LOGE("SendDirectJson: SendText function pointer is null!");
         return;
     }
 
-    // 2. Проверяем, нашли ли мы функцию (должна быть найдена при init)
-    if (func_CupController_Roll != nullptr) {
-        LOGW("GameHooks: >>> INVOKING RollDices() on instance %p <<<", g_CupControllerInstance);
-        
-        // Вызываем приватный метод игры!
-        // Это эквивалентно тому, что игрок нажал на стаканчик.
-        func_CupController_Roll(g_CupControllerInstance);
-        
-        NetworkClient::Instance().SendToast("🎲 Dice Rolled!");
-    } else {
-        LOGE("GameHooks: Roll function address is null!");
+    // 2. Получаем указатель на WebSocket (поле offset 0x48)
+    void* webSocketInstance = *(void**)((uintptr_t)g_SocketBusInstance + Config::OFFSET_SOCKETBUS_WEBSOCKET);
+    if (webSocketInstance == nullptr) {
+        LOGE("SendDirectJson: WebSocket field is null!");
+        return;
     }
+
+    // 3. Работаем с ID сообщения (поле offset 0x5C)
+    // Читаем текущий ID из памяти игры
+    int* pIdCounter = (int*)((uintptr_t)g_SocketBusInstance + Config::OFFSET_SOCKETBUS_ID);
+    
+    // Инкрементируем (мы как бы "занимаем" следующий слот)
+    *pIdCounter = *pIdCounter + 1;
+    int currentId = *pIdCounter;
+
+    // 4. Генерируем время
+    std::string timestamp = GetCurrentTimeISO8601();
+
+    // 5. Собираем ПОЛНЫЙ пакет
+    // Формат: {"id":5,"time":"...","type":"StageAction","payload":{...}}
+    std::stringstream ss;
+    ss << "{\"id\":" << currentId 
+       << ",\"time\":\"" << timestamp << "\""
+       << ",\"type\":\"StageAction\"" 
+       << ",\"payload\":" << innerPayload << "}";
+
+    std::string fullPacket = ss.str();
+
+    // 6. Конвертируем в C# строку
+    void* il2cppStr = CreateIl2CppString(fullPacket.c_str());
+    if (!il2cppStr) {
+        LOGE("SendDirectJson: Failed to create string");
+        return;
+    }
+
+    // 7. Отправляем через WebSocket.SendText
+    LOGW("GameHooks: >>> SENDING PACKET ID [%d]: %s", currentId, fullPacket.c_str());
+    func_SendText(webSocketInstance, il2cppStr);
+    
+    NetworkClient::Instance().SendToast("Packet " + std::to_string(currentId) + " Sent!");
 }
 
 // =============================================================
-// ФУНКЦИИ-ПЕРЕХВАТЧИКИ
+// ХУКИ
 // =============================================================
 
-// --- Обработка JSON ---
-void ProcessJson(const std::string& rawJson, const char* tagPrefix) {
-    if (Utils::IsSpamOrIgnored(rawJson)) return;
+// Хук конструктора SocketBus: ловим instance
+void H_SocketBus_Ctor(void* instance, void* webSocket, void* queue, void* signal, bool log) {
+    g_SocketBusInstance = instance;
+    LOGI("GameHooks: Captured SocketBus instance: %p", instance);
+    
+    // Для отладки покажем текущий ID
+    int currentId = *(int*)((uintptr_t)instance + Config::OFFSET_SOCKETBUS_ID);
+    LOGI("GameHooks: Current SocketBus ID is: %d", currentId);
 
-    std::string minifiedJson = Utils::SmartMinify(rawJson);
-    if (Utils::IsSpamOrIgnored(minifiedJson)) return;
-
-    LogTraffic(tagPrefix, minifiedJson);
-
-    // Если это ВХОДЯЩИЙ трафик, отдаем менеджеру (сейчас там отключена валидация, но пусть будет)
-    if (strcmp(tagPrefix, "IN") == 0) {
-        CommandManager::Instance().AnalyzeGameResponse(minifiedJson);
-    }
-
-    if (NetworkClient::Instance().IsConnected()) {
-        std::string netMsg = std::string(tagPrefix) + ": " + minifiedJson;
-        NetworkClient::Instance().SendRaw(netMsg);
+    if (orig_SocketBus_Ctor) {
+        orig_SocketBus_Ctor(instance, webSocket, queue, signal, log);
     }
 }
 
-// --- 1. Хук Update ---
 void H_Update(void* instance) {
     if (orig_Update) orig_Update(instance);
 
-    // Спрашиваем у менеджера, есть ли команда на выполнение
     std::string cmd = CommandManager::Instance().ProcessQueue();
     if (!cmd.empty()) {
         LOGI("[MainThread] Executing command: %s", cmd.c_str());
-        
-        // === ОБРАБОТКА КОМАНД ===
+
+        // --- ВАРИАНТЫ КОМАНД ---
+
         if (cmd == "roll_dice") {
-            ForceGameRoll();
+            // Отправляем БРОСОК
+            const char* payload = "{\"stage\":\"GamePlay\",\"action\":\"RollDice\"}";
+            SendDirectJson(payload);
         }
-        else {
-            // Для других команд просто шлем тост, пока не реализованы
-            NetworkClient::Instance().SendToast("CMD: " + cmd);
+        else if (cmd == "double_accept") {
+             // ПРИНЯТЬ УДВОЕНИЕ
+             const char* payload = "{\"stage\":\"GamePlay\",\"action\":\"DoublingAccept\"}";
+             SendDirectJson(payload);
         }
-        // ========================
+        else if (cmd == "double_reject") {
+             // X УДВОЕНИЕ
+             const char* payload = "{\"stage\":\"GamePlay\",\"action\":\"DoublingReject\"}";
+             SendDirectJson(payload);
+        }
     }
 }
 
-// --- 2. Хук на конструктор контроллера стаканчика ---
-// Этот хук нужен только для того, чтобы украсть "this" (g_CupControllerInstance)
-void H_CupController_Ctor(void* instance, void* board, void* cmd) {
-    // Сохраняем указатель на созданный объект
-    g_CupControllerInstance = instance;
-    LOGI("GameHooks: Captured CupController instance: %p", instance);
-
-    // Обязательно вызываем оригинал!
-    if (orig_CupController_Ctor) {
-        orig_CupController_Ctor(instance, board, cmd);
-    }
-}
-
-// --- 3. Хук SerializeObject (OUT) ---
+// Логгирование исходящего JSON (сериализация)
 void* H_SerializeObject(void* value) {
-    void* resultString = orig_SerializeObject(value);
-    if (resultString) {
-        std::string jsonStr = ReadIl2CppString(resultString);
-        ProcessJson(jsonStr, "OUT");
+    void* res = orig_SerializeObject(value);
+    if (res) {
+        std::string s = ReadIl2CppString(res);
+        if (!Utils::IsSpamOrIgnored(s)) {
+            if (NetworkClient::Instance().IsConnected()) {
+                // Шлем на сервер "как есть", чтобы видеть структуру
+                NetworkClient::Instance().SendRaw("OUT: " + Utils::SmartMinify(s));
+            }
+        }
     }
-    return resultString;
+    return res;
 }
 
-// --- 4. Хук DeserializeObject (IN) ---
+// Логгирование входящего JSON (десериализация)
 void* H_DeserializeObject(void* str, void* type, void* settings) {
     if (str) {
-        std::string jsonStr = ReadIl2CppString(str);
-        ProcessJson(jsonStr, "IN");
+         std::string s = ReadIl2CppString(str);
+         if (!Utils::IsSpamOrIgnored(s)) {
+             if (NetworkClient::Instance().IsConnected()) {
+                NetworkClient::Instance().SendRaw("IN: " + Utils::SmartMinify(s));
+            }
+         }
     }
     return orig_DeserializeObject(str, type, settings);
+}
+
+// Оставляем старый хук для стаканчика (на всякий случай)
+void H_CupController_Ctor(void* instance, void* board, void* cmd) {
+    g_CupControllerInstance = instance;
+    if (orig_CupController_Ctor) orig_CupController_Ctor(instance, board, cmd);
 }
 
 // =============================================================
@@ -185,18 +247,26 @@ void* H_DeserializeObject(void* str, void* type, void* settings) {
 void GameHooks::Install(uintptr_t baseAddress) {
     LOGI("GameHooks: Initialization started...");
 
-    // 1. Системные хуки (Сеть и Update)
+    // 1. Ищем функцию создания строк
+    void* libHandle = dlopen("libil2cpp.so", RTLD_NOW);
+    if (libHandle) {
+        func_il2cpp_string_new = (il2cpp_string_new_t)dlsym(libHandle, "il2cpp_string_new");
+        if (func_il2cpp_string_new) LOGI("GameHooks: Found il2cpp_string_new");
+        else LOGE("GameHooks: Failed to find il2cpp_string_new");
+    }
+
+    // 2. Ставим хуки
     A64HookFunction((void*)(baseAddress + Config::RVA_UPDATE_FUNC), (void*)H_Update, (void**)&orig_Update);
     A64HookFunction((void*)(baseAddress + Config::RVA_SERIALIZE), (void*)H_SerializeObject, (void**)&orig_SerializeObject);
     A64HookFunction((void*)(baseAddress + Config::RVA_DESERIALIZE), (void*)H_DeserializeObject, (void**)&orig_DeserializeObject);
-
-    // 2. Хук на конструктор контроллера (Ловим this)
-    // Используем адрес из конфига
     A64HookFunction((void*)(baseAddress + Config::RVA_CUP_CTOR), (void*)H_CupController_Ctor, (void**)&orig_CupController_Ctor);
+    
+    // Перехват SocketBus
+    A64HookFunction((void*)(baseAddress + Config::RVA_SOCKETBUS_CTOR), (void*)H_SocketBus_Ctor, (void**)&orig_SocketBus_Ctor);
 
-    // 3. Получаем адрес функции броска (без хука)
-    // Мы будем вызывать её сами
+    // 3. Сохраняем адреса для прямых вызовов
     func_CupController_Roll = (CupController_Roll_t)(baseAddress + Config::RVA_ROLL_METHOD);
+    func_SendText = (WebSocket_SendText_t)(baseAddress + Config::RVA_WEBSOCKET_SENDTEXT);
 
-    LOGI("GameHooks: All hooks installed. Ready to roll!");
+    LOGI("GameHooks: Hooks installed. Waiting for game start...");
 }
