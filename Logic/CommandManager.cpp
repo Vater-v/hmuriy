@@ -9,9 +9,10 @@ CommandManager& CommandManager::Instance() {
 void CommandManager::AddCommand(const std::string& cmdId) {
     std::lock_guard<std::mutex> lock(mtx);
 
-    // Дедупликация: если такая команда уже висит и не подтверждена, игнорируем дубль
+    // Оставляем простую дедупликацию, чтобы не заспамить очередь одной и той же кнопкой
+    // Если такая команда уже есть в очереди - не добавляем новую.
     for (const auto& cmd : queue) {
-        if (cmd.id == cmdId && !cmd.confirmedByServer) {
+        if (cmd.id == cmdId) {
             LOGW("CmdMgr: Duplicate ignored: %s", cmdId.c_str());
             return;
         }
@@ -29,60 +30,39 @@ void CommandManager::AddCommand(const std::string& cmdId) {
 }
 
 void CommandManager::AnalyzeGameResponse(const std::string& jsonResponse) {
+    /* // --- [DISABLED] СТАРАЯ ЛОГИКА ВАЛИДАЦИИ ---
     std::lock_guard<std::mutex> lock(mtx);
-
     if (queue.empty()) return;
 
     GameCommand& current = queue.front();
-
-    // --- ЛОГИКА ВАЛИДАЦИИ ---
-    // Здесь нужно определить, какие признаки в JSON говорят об успехе текущей команды.
-    
     bool isSuccess = false;
 
-    // ПРИМЕР 1: Универсальный триггер (если игра возвращает "success":true или status:ok)
+    // Проверяем JSON на признаки успеха...
     if (jsonResponse.find("\"status\":\"ok\"") != std::string::npos || 
         jsonResponse.find("\"success\":true") != std::string::npos) {
         isSuccess = true;
     }
 
-    // ПРИМЕР 2: Зависимость от ID команды.
-    // Если мы отправляли "collect_bonus", мы ждем в ответе изменения баланса или "bonus_collected"
-    if (current.id.find("collect") != std::string::npos) {
-        if (jsonResponse.find("\"currency\":") != std::string::npos) {
-            isSuccess = true;
-        }
-    }
-    
-    // ПРИМЕР 3: Просто факт получения ЛЮБОГО валидного (не пустого) ответа на входящем потоке
-    // Это самый простой вариант: если после отправки команды пришел JSON, считаем, что все ок.
-    // if (jsonResponse.length() > 2) isSuccess = true; 
-
     if (isSuccess) {
         current.confirmedByServer = true;
-        LOGI("CmdMgr: [INTERNAL VALIDATION] Confirmed '%s' via Game Traffic.", current.id.c_str());
+        LOGI("CmdMgr: [VALIDATION] Confirmed '%s'", current.id.c_str());
         queue.pop_front();
     }
+    */
 }
 
 void CommandManager::ConfirmSuccess(const std::string& receivedSuccessMsg) {
+    /*
+    // --- [DISABLED] СТАРАЯ ЛОГИКА ПОДТВЕРЖДЕНИЯ (ACK) ---
     std::lock_guard<std::mutex> lock(mtx);
-
     if (queue.empty()) return;
 
-    // Предполагаем, что сервер шлет "ID_success" или просто ID, если протокол позволяет.
-    // Здесь логика: если пришло сообщение, содержащее ID текущей команды.
     GameCommand& current = queue.front();
-    
-    // Простая проверка: если сообщение содержит ID команды (или равно ему)
-    // Можно ужесточить проверку: if (receivedSuccessMsg == current.id + "_ACK")
     if (receivedSuccessMsg.find(current.id) != std::string::npos) {
         current.confirmedByServer = true;
-        LOGI("CmdMgr: [OK] Confirmed '%s'. Removing from queue.", current.id.c_str());
         queue.pop_front();
-    } else {
-        LOGD("CmdMgr: Ignored confirmation '%s' (Waiting for '%s')", receivedSuccessMsg.c_str(), current.id.c_str());
     }
+    */
 }
 
 std::string CommandManager::ProcessQueue() {
@@ -91,18 +71,30 @@ std::string CommandManager::ProcessQueue() {
     if (queue.empty()) return "";
 
     GameCommand& current = queue.front();
+    
+    // === FIRE & FORGET MODE (Одна попытка) ===
+    
+    std::string commandId = current.id;
+    
+    // Удаляем команду из очереди СРАЗУ, не дожидаясь результата.
+    queue.pop_front();
+    
+    LOGD("CmdMgr: Executing (One-Shot): %s", commandId.c_str());
+    return commandId;
+
+    /*
+    // --- [DISABLED] СТАРАЯ ЛОГИКА RETRY И ОЖИДАНИЯ ---
+    
     auto now = std::chrono::steady_clock::now();
 
-    // 1. Первая попытка исполнения
+    // 1. Первая попытка
     if (!current.executedLocally) {
         current.executedLocally = true;
         current.lastAttemptTime = now;
-        LOGD("CmdMgr: Executing first time: %s", current.id.c_str());
         return current.id;
     }
 
-    // 2. Логика повторов (Retry)
-    // Если исполнили, но сервер не подтвердил, и прошло время таймаута
+    // 2. Повторы (Retry) по таймауту
     if (current.executedLocally && !current.confirmedByServer) {
         long elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - current.lastAttemptTime).count();
 
@@ -110,18 +102,17 @@ std::string CommandManager::ProcessQueue() {
             if (current.retryCount < CmdConfig::MAX_RETRIES) {
                 current.retryCount++;
                 current.lastAttemptTime = now;
-                
                 LOGW("CmdMgr: [RETRY %d/%d] %s", current.retryCount, CmdConfig::MAX_RETRIES, current.id.c_str());
-                return current.id; // Возвращаем ID, чтобы main thread исполнил снова
+                return current.id;
             } else {
                 LOGE("CmdMgr: [TIMEOUT] Give up on %s", current.id.c_str());
-                queue.pop_front(); // Удаляем, так и не дождавшись
+                queue.pop_front();
                 return "";
             }
         }
     }
-
-    return ""; // Ждем, ничего делать не надо
+    return "";
+    */
 }
 
 void CommandManager::Clear() {

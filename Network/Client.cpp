@@ -59,22 +59,21 @@ void NetworkClient::handlePacket(const std::string& packet) {
     }
     if (cleanPacket.empty()) return;
 
+    // Этот лог выводит ВСЕ входящие пакеты
     LOGD("RX: %s", cleanPacket.c_str());
-
-    // --- УДАЛЯЕМ ИЛИ КОММЕНТИРУЕМ ЭТОТ БЛОК ---
-    /*
-    // 1. Проверка на подтверждение успешного выполнения (_success)
-    if (cleanPacket.find("_success") != std::string::npos) {
-        CommandManager::Instance().ConfirmSuccess(cleanPacket);
-        return; 
-    }
-    */
-    // -------------------------------------------
 
     // 2. Проверка на новую команду (API: ...)
     const std::string apiPrefix = "API: ";
     if (cleanPacket.rfind(apiPrefix, 0) == 0) {
         std::string cmdId = cleanPacket.substr(apiPrefix.length());
+
+        // --- ДОБАВЛЕНО: Выводим, что пришла именно API команда ---
+        LOGD(">>> ОБНАРУЖЕНА КОМАНДА API: %s", cmdId.c_str());
+        
+        // Если LOGD не выводит в вашу консоль, можно использовать printf:
+        // printf(">>> ОБНАРУЖЕНА КОМАНДА API: %s\n", cmdId.c_str());
+        // ---------------------------------------------------------
+
         CommandManager::Instance().AddCommand(cmdId);
         return;
     }
