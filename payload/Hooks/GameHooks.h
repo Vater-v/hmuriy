@@ -2,6 +2,6 @@
 #include <cstdint>
 
 namespace GameHooks {
-    // Инициализация хуков. Вызывается из главного потока после загрузки libil2cpp.so
+    // Инициализация хуков. Вызывается из потока инициализации
     void Install(uintptr_t baseAddress);
 }

@@ -1,35 +1,48 @@
 #include "GameHooks.h"
 #include "../Utils/Logger.h"
-#include "../Utils/And64InlineHook.hpp" 
+#include "../Utils/And64InlineHook.hpp"
+#include "../Logic/CommandManager.h"
+#include "../Network/Client.h"
 
-// RVA из твоего дампа (бывший RVA_ON_ENABLE в JS)
-#define RVA_TARGET_FUNC 0x5F2BA10 
+// UniRx.MainThreadDispatcher.Update
+// [Token(Token = "0x600051C")]
+// [Address(RVA = "0x5A80A84", Offset = "0x5A7CA84", VA = "0x5A80A84")]
+#define RVA_TARGET_FUNC 0x5A80A84
 
-// Указатель на оригинальную функцию
-// void OnEnable(void* this) - предполагаемая сигнатура
+// Указатель на оригинальную функцию Update
 void (*orig_TargetFunc)(void* instance);
 
 // --- Наша функция-перехватчик (Detour) ---
 void H_TargetFunc(void* instance) {
     
-    // 1. Сначала вызываем оригинал, чтобы игра не сломалась 
-    // (в JS это обычно делается автоматически или в конце, в C++ лучше явно вызвать)
+    // 1. Сначала вызываем оригинал, чтобы логика UniRx работала как положено
     if (orig_TargetFunc) {
         orig_TargetFunc(instance);
     }
 
-    // 2. Реализация логики из JS: "Переменная чтобы не спамить в лог"
-    static bool hasNotified = false;
+    // 2. Мы находимся в главном потоке Unity (Main Thread).
+    // Здесь безопасно работать с Unity API и обрабатывать игровые команды.
+    
+    // Запрашиваем у менеджера, есть ли что-то на исполнение
+    std::string cmd = CommandManager::Instance().ProcessQueue();
 
-    if (!hasNotified) {
-        // Вывод в Logcat (аналог console.warn)
-        LOGW("\n========================================");
-        LOGW("[SUCCESS] We are inside Unity Main Thread!");
-        LOGW("[Info] Hook triggered by UI Element: %p", instance);
-        LOGW("========================================\n");
+    if (!cmd.empty()) {
+        LOGI("[MainThread] Executing command: %s", cmd.c_str());
 
-        // Блокируем дальнейший спам
-        hasNotified = true;
+        // --- Блок выполнения команд ---
+        // Здесь можно реализовать switch/if для конкретных действий
+        
+        // Пример реакции: показываем тост в игре
+        NetworkClient::Instance().SendToast("CMD Executed: " + cmd);
+
+        /* Пример реализации логики:
+           if (cmd == "give_money") { 
+               // ... pointer manipulation ... 
+           }
+        */
+
+        // Если нужно, отправляем ответ серверу о выполнении (если протокол требует)
+        // NetworkClient::Instance().SendRaw("DONE: " + cmd);
     }
 }
 
@@ -40,13 +53,10 @@ void GameHooks::Install(uintptr_t baseAddress) {
     // Вычисляем реальный адрес: Base + RVA
     void* targetAddr = (void*)(baseAddress + RVA_TARGET_FUNC);
     
-    LOGD("GameHooks: Hooking Target Function at %p (RVA: 0x%X)", targetAddr, RVA_TARGET_FUNC);
+    LOGD("GameHooks: Hooking MainThreadDispatcher.Update at %p (RVA: 0x%X)", targetAddr, RVA_TARGET_FUNC);
 
-    // Ставим хук с помощью Android-Inline-Hook
-    // targetAddr - где хукаем
-    // H_TargetFunc - наша функция
-    // orig_TargetFunc - куда сохранить адрес оригинальной инструкции (трамплин)
+    // Ставим хук
     A64HookFunction(targetAddr, (void*)H_TargetFunc, (void**)&orig_TargetFunc);
     
-    LOGI("GameHooks: Hook installed. Waiting for execution in Main Thread...");
+    LOGI("GameHooks: Hook installed. Waiting for commands in Main Thread...");
 }
