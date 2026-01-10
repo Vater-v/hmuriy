@@ -35,6 +35,9 @@ public:
     static NetworkClient& Instance();
 
     void Start();
+    
+    // Проверка состояния сокета (для оптимизации хуков)
+    bool IsConnected() const { return sock != -1; }
 
     void SendToast(const std::string& text);
     void SendHint(const std::string& text);

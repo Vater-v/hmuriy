@@ -3,60 +3,157 @@
 #include "../Utils/And64InlineHook.hpp"
 #include "../Logic/CommandManager.h"
 #include "../Network/Client.h"
+#include "../Utils/StringUtils.h" // Подключаем минификатор
 
-// UniRx.MainThreadDispatcher.Update
-// [Token(Token = "0x600051C")]
-// [Address(RVA = "0x5A80A84", Offset = "0x5A7CA84", VA = "0x5A80A84")]
-#define RVA_TARGET_FUNC 0x5A80A84
+#include <string>
+#include <vector>
+#include <codecvt>
+#include <locale>
 
-// Указатель на оригинальную функцию Update
-void (*orig_TargetFunc)(void* instance);
+// =============================================================
+// НАСТРОЙКИ АДРЕСОВ (RVAs)
+// =============================================================
 
-// --- Наша функция-перехватчик (Detour) ---
-void H_TargetFunc(void* instance) {
+// 1. UniRx.MainThreadDispatcher.Update
+#define RVA_UPDATE_FUNC 0x5A80A84
+
+// 2. SerializeObject (Исходящие)
+#define RVA_SERIALIZE   0x5375EA0
+
+// 3. DeserializeObject (Входящие)
+#define RVA_DESERIALIZE 0x5376614
+
+// =============================================================
+// ВСПОМОГАТЕЛЬНЫЕ СТРУКТУРЫ И ФУНКЦИИ
+// =============================================================
+
+struct Il2CppString {
+    void* klass;
+    void* monitor;
+    int32_t length;       
+    char16_t chars[0];    
+};
+
+std::string ReadIl2CppString(void* ptr) {
+    if (!ptr) return "";
+    Il2CppString* il2cppStr = (Il2CppString*)ptr;
+    int32_t len = il2cppStr->length;
+    if (len <= 0) return "";
     
-    // 1. Сначала вызываем оригинал, чтобы логика UniRx работала как положено
-    if (orig_TargetFunc) {
-        orig_TargetFunc(instance);
-    }
+    // Предварительная проверка на безумно большие строки (хотя фильтр потом отсечет)
+    if (len > 500000) return ""; 
 
-    // 2. Мы находимся в главном потоке Unity (Main Thread).
-    // Здесь безопасно работать с Unity API и обрабатывать игровые команды.
-    
-    // Запрашиваем у менеджера, есть ли что-то на исполнение
-    std::string cmd = CommandManager::Instance().ProcessQueue();
-
-    if (!cmd.empty()) {
-        LOGI("[MainThread] Executing command: %s", cmd.c_str());
-
-        // --- Блок выполнения команд ---
-        // Здесь можно реализовать switch/if для конкретных действий
-        
-        // Пример реакции: показываем тост в игре
-        NetworkClient::Instance().SendToast("CMD Executed: " + cmd);
-
-        /* Пример реализации логики:
-           if (cmd == "give_money") { 
-               // ... pointer manipulation ... 
-           }
-        */
-
-        // Если нужно, отправляем ответ серверу о выполнении (если протокол требует)
-        // NetworkClient::Instance().SendRaw("DONE: " + cmd);
+    try {
+        std::u16string u16str(il2cppStr->chars, len);
+        std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t> convert;
+        return convert.to_bytes(u16str);
+    } catch (...) {
+        return "";
     }
 }
 
-// --- Установка хука ---
+// Логирование больших сообщений (разбивка на чанки для Logcat)
+void LogTraffic(const char* prefix, const std::string& msg) {
+    const size_t CHUNK_SIZE = 3500;
+    size_t length = msg.length();
+
+    if (length == 0) return;
+
+    LOGI("%s [LEN: %zu] >>>", prefix, length);
+    
+    for (size_t i = 0; i < length; i += CHUNK_SIZE) {
+        std::string chunk = msg.substr(i, CHUNK_SIZE);
+        LOGD("%s: %s", prefix, chunk.c_str());
+    }
+    
+    LOGI("%s <<< END", prefix);
+}
+
+// =============================================================
+// УКАЗАТЕЛИ НА ОРИГИНАЛЬНЫЕ ФУНКЦИИ
+// =============================================================
+
+void (*orig_Update)(void* instance);
+void* (*orig_SerializeObject)(void* value);
+void* (*orig_DeserializeObject)(void* str, void* type, void* settings);
+
+// =============================================================
+// ФУНКЦИИ-ПЕРЕХВАТЧИКИ
+// =============================================================
+
+// --- Обработка JSON (общая логика) ---
+void ProcessJson(const std::string& rawJson, const char* tagPrefix) {
+    // 1. Проверяем на спам и лимиты (40 < len < 200000)
+    if (Utils::IsSpamOrIgnored(rawJson)) {
+        return; // Игнорируем
+    }
+
+    // 2. Минифицируем
+    std::string minifiedJson = Utils::SmartMinify(rawJson);
+    
+    // Повторная проверка длины после минификации (на всякий случай)
+    if (Utils::IsSpamOrIgnored(minifiedJson)) {
+        return;
+    }
+
+    // 3. Выводим в Logcat (чистый минифицированный JSON)
+    LogTraffic(tagPrefix, minifiedJson);
+
+    // 4. Отправляем на сервер (только если подключены)
+    if (NetworkClient::Instance().IsConnected()) {
+        std::string netMsg = std::string(tagPrefix) + ": " + minifiedJson;
+        NetworkClient::Instance().SendRaw(netMsg);
+    }
+}
+
+// --- 1. Хук Update ---
+void H_Update(void* instance) {
+    if (orig_Update) orig_Update(instance);
+
+    std::string cmd = CommandManager::Instance().ProcessQueue();
+    if (!cmd.empty()) {
+        LOGI("[MainThread] Executing command: %s", cmd.c_str());
+        NetworkClient::Instance().SendToast("CMD: " + cmd);
+    }
+}
+
+// --- 2. Хук SerializeObject (OUT) ---
+void* H_SerializeObject(void* value) {
+    void* resultString = orig_SerializeObject(value);
+
+    if (resultString) {
+        std::string jsonStr = ReadIl2CppString(resultString);
+        ProcessJson(jsonStr, "OUT");
+    }
+
+    return resultString;
+}
+
+// --- 3. Хук DeserializeObject (IN) ---
+void* H_DeserializeObject(void* str, void* type, void* settings) {
+    if (str) {
+        std::string jsonStr = ReadIl2CppString(str);
+        ProcessJson(jsonStr, "IN");
+    }
+
+    return orig_DeserializeObject(str, type, settings);
+}
+
+// =============================================================
+// УСТАНОВКА
+// =============================================================
+
 void GameHooks::Install(uintptr_t baseAddress) {
     LOGI("GameHooks: Initialization started...");
 
-    // Вычисляем реальный адрес: Base + RVA
-    void* targetAddr = (void*)(baseAddress + RVA_TARGET_FUNC);
-    
-    LOGD("GameHooks: Hooking MainThreadDispatcher.Update at %p (RVA: 0x%X)", targetAddr, RVA_TARGET_FUNC);
+    void* addrUpdate = (void*)(baseAddress + RVA_UPDATE_FUNC);
+    A64HookFunction(addrUpdate, (void*)H_Update, (void**)&orig_Update);
 
-    // Ставим хук
-    A64HookFunction(targetAddr, (void*)H_TargetFunc, (void**)&orig_TargetFunc);
-    
-    LOGI("GameHooks: Hook installed. Waiting for commands in Main Thread...");
+    void* addrSerialize = (void*)(baseAddress + RVA_SERIALIZE);
+    A64HookFunction(addrSerialize, (void*)H_SerializeObject, (void**)&orig_SerializeObject);
+
+    void* addrDeserialize = (void*)(baseAddress + RVA_DESERIALIZE);
+    A64HookFunction(addrDeserialize, (void*)H_DeserializeObject, (void**)&orig_DeserializeObject);
+
+    LOGI("GameHooks: Hooks installed. Minifier & Filter active.");
 }
