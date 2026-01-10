@@ -28,7 +28,6 @@ void* NetworkClient::thread_entry(void* instance) {
 
 bool NetworkClient::sendData(const std::string& data) {
     if (sock == -1) return false;
-    // MSG_NOSIGNAL предотвращает крэш приложения при разрыве трубы
     ssize_t sent = send(sock, data.c_str(), data.length(), MSG_NOSIGNAL);
     if (sent < 0) {
         LOGE("Net: Send failed: %s", strerror(errno));
@@ -42,7 +41,7 @@ void NetworkClient::enqueueMessage(std::string msg) {
     if (msg.back() != '\n') msg += "\n";
 
     std::lock_guard<std::mutex> lock(queueMutex);
-    if (sendQueue.size() > 100) sendQueue.pop(); // Защита от переполнения
+    if (sendQueue.size() > 100) sendQueue.pop(); 
     sendQueue.push(msg);
 }
 
@@ -50,7 +49,7 @@ void NetworkClient::SendToast(const std::string& text) { enqueueMessage("TOAST: 
 void NetworkClient::SendHint(const std::string& text) { enqueueMessage("HINT: " + text); }
 void NetworkClient::SendRaw(const std::string& text) { enqueueMessage(text); }
 
-// --- Логика обработки входящих пакетов ---
+// --- ОБРАБОТКА ВХОДЯЩИХ ПАКЕТОВ ---
 
 void NetworkClient::handlePacket(const std::string& packet) {
     std::string cleanPacket = packet;
@@ -59,22 +58,20 @@ void NetworkClient::handlePacket(const std::string& packet) {
     }
     if (cleanPacket.empty()) return;
 
-    // Этот лог выводит ВСЕ входящие пакеты
+    // Логируем входящее (для дебага)
     LOGD("RX: %s", cleanPacket.c_str());
 
-    // 2. Проверка на новую команду (API: ...)
+    // Ищем префикс "API: "
     const std::string apiPrefix = "API: ";
     if (cleanPacket.rfind(apiPrefix, 0) == 0) {
-        std::string cmdId = cleanPacket.substr(apiPrefix.length());
+        // Отрезаем "API: " и берем всё остальное как JSON
+        std::string jsonPayload = cleanPacket.substr(apiPrefix.length());
 
-        // --- ДОБАВЛЕНО: Выводим, что пришла именно API команда ---
-        LOGD(">>> ОБНАРУЖЕНА КОМАНДА API: %s", cmdId.c_str());
+        LOGD(">>> API PAYLOAD RECEIVED: %s", jsonPayload.c_str());
         
-        // Если LOGD не выводит в вашу консоль, можно использовать printf:
-        // printf(">>> ОБНАРУЖЕНА КОМАНДА API: %s\n", cmdId.c_str());
-        // ---------------------------------------------------------
-
-        CommandManager::Instance().AddCommand(cmdId);
+        // Добавляем этот JSON в очередь команд.
+        // GameHooks в MainThread заберет его и отправит в SendDirectJson.
+        CommandManager::Instance().AddCommand(jsonPayload);
         return;
     }
 }
@@ -83,7 +80,6 @@ void NetworkClient::processIncomingData(char* buffer, int length) {
     incomingBuffer.append(buffer, length);
 
     size_t pos = 0;
-    // Рубим склеенные пакеты по символу новой строки
     while ((pos = incomingBuffer.find('\n')) != std::string::npos) {
         std::string packet = incomingBuffer.substr(0, pos);
         handlePacket(packet);
@@ -95,7 +91,6 @@ void NetworkClient::run() {
     LOGD("Network Thread Started");
 
     while (isRunning) {
-        // --- Реконнект ---
         if (sock == -1) {
             sock = socket(AF_INET, SOCK_STREAM, 0);
             struct sockaddr_in server;
@@ -106,14 +101,13 @@ void NetworkClient::run() {
             if (connect(sock, (struct sockaddr *)&server, sizeof(server)) < 0) {
                 close(sock);
                 sock = -1;
-                sleep(2); // Ждем перед повторной попыткой
+                sleep(2); 
                 continue;
             }
             LOGD(">>> Connected to Python Server <<<");
             CommandManager::Instance().Clear(); 
         }
 
-        // --- Отправка (из очереди) ---
         {
             std::lock_guard<std::mutex> lock(queueMutex);
             while (!sendQueue.empty()) {
@@ -122,18 +116,17 @@ void NetworkClient::run() {
                 } else {
                     close(sock);
                     sock = -1;
-                    break; // Выход из цикла отправки, идем на реконнект
+                    break; 
                 }
             }
         }
         
         if (sock == -1) continue;
 
-        // --- Чтение (non-blocking через select) ---
         fd_set readfds;
         FD_ZERO(&readfds);
         FD_SET(sock, &readfds);
-        struct timeval timeout = {0, 50000}; // 50ms таймаут
+        struct timeval timeout = {0, 50000}; 
 
         int activity = select(sock + 1, &readfds, NULL, NULL, &timeout);
 
@@ -150,8 +143,6 @@ void NetworkClient::run() {
                 sock = -1;
             }
         }
-        
-        // Небольшая пауза, чтобы поток не ел 100% CPU
         usleep(10000); 
     }
 }
