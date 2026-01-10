@@ -40,6 +40,8 @@ public:
     // Подтвердить выполнение (вызывается из NetworkClient при получении ACK)
     void ConfirmSuccess(const std::string& receivedSuccessMsg);
 
+    void AnalyzeGameResponse(const std::string& jsonResponse);
+
     // Получить команду для исполнения (вызывается из Main Thread)
     // Возвращает пустую строку, если команд нет или ждать рано
     std::string ProcessQueue();

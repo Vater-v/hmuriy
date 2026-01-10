@@ -54,8 +54,6 @@ void NetworkClient::SendRaw(const std::string& text) { enqueueMessage(text); }
 
 void NetworkClient::handlePacket(const std::string& packet) {
     std::string cleanPacket = packet;
-    
-    // Чистим мусор (\r), который часто прилетает из Python/Telnet
     if (!cleanPacket.empty() && cleanPacket.back() == '\r') {
         cleanPacket.pop_back();
     }
@@ -63,12 +61,15 @@ void NetworkClient::handlePacket(const std::string& packet) {
 
     LOGD("RX: %s", cleanPacket.c_str());
 
+    // --- УДАЛЯЕМ ИЛИ КОММЕНТИРУЕМ ЭТОТ БЛОК ---
+    /*
     // 1. Проверка на подтверждение успешного выполнения (_success)
-    // Сервер прислал, например: "API: move_0_1_success" или просто "roll_dice_success"
     if (cleanPacket.find("_success") != std::string::npos) {
         CommandManager::Instance().ConfirmSuccess(cleanPacket);
         return; 
     }
+    */
+    // -------------------------------------------
 
     // 2. Проверка на новую команду (API: ...)
     const std::string apiPrefix = "API: ";

@@ -28,6 +28,43 @@ void CommandManager::AddCommand(const std::string& cmdId) {
     LOGI("CmdMgr: [+] Enqueued: %s", cmdId.c_str());
 }
 
+void CommandManager::AnalyzeGameResponse(const std::string& jsonResponse) {
+    std::lock_guard<std::mutex> lock(mtx);
+
+    if (queue.empty()) return;
+
+    GameCommand& current = queue.front();
+
+    // --- ЛОГИКА ВАЛИДАЦИИ ---
+    // Здесь нужно определить, какие признаки в JSON говорят об успехе текущей команды.
+    
+    bool isSuccess = false;
+
+    // ПРИМЕР 1: Универсальный триггер (если игра возвращает "success":true или status:ok)
+    if (jsonResponse.find("\"status\":\"ok\"") != std::string::npos || 
+        jsonResponse.find("\"success\":true") != std::string::npos) {
+        isSuccess = true;
+    }
+
+    // ПРИМЕР 2: Зависимость от ID команды.
+    // Если мы отправляли "collect_bonus", мы ждем в ответе изменения баланса или "bonus_collected"
+    if (current.id.find("collect") != std::string::npos) {
+        if (jsonResponse.find("\"currency\":") != std::string::npos) {
+            isSuccess = true;
+        }
+    }
+    
+    // ПРИМЕР 3: Просто факт получения ЛЮБОГО валидного (не пустого) ответа на входящем потоке
+    // Это самый простой вариант: если после отправки команды пришел JSON, считаем, что все ок.
+    // if (jsonResponse.length() > 2) isSuccess = true; 
+
+    if (isSuccess) {
+        current.confirmedByServer = true;
+        LOGI("CmdMgr: [INTERNAL VALIDATION] Confirmed '%s' via Game Traffic.", current.id.c_str());
+        queue.pop_front();
+    }
+}
+
 void CommandManager::ConfirmSuccess(const std::string& receivedSuccessMsg) {
     std::lock_guard<std::mutex> lock(mtx);
 
