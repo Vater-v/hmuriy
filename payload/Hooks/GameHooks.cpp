@@ -1,47 +1,60 @@
 #include "GameHooks.h"
-#include "../Game/GameConfig.h"
 #include "../Utils/Logger.h"
 #include "../Network/Client.h"
 #include "../Logic/CommandManager.h"
 #include "../Utils/And64InlineHook.hpp" 
 
-// --- Заглушка исполнителя команд ---
-// Сюда будет попадать ID команды из очереди. 
-// Сейчас она просто пишет в лог.
+// RVA для UnityEngine.EventSystems.EventSystem.Update
+#define RVA_EVENTSYSTEM_UPDATE 0x611F6E0
+
+// --- Заглушка исполнителя ---
 void ExecuteGameAction(const std::string& action) {
-    LOGD("GameHooks [STUB]: Received command to execute -> '%s'", action.c_str());
+    LOGD("GameHooks: Executing action -> '%s'", action.c_str());
     
     if (action == "test_ping") {
-        NetworkClient::Instance().SendHint("Pong! 🏓");
+        NetworkClient::Instance().SendHint("Pong! 🏓 (EventSystem)");
     }
-    
-    // Тут ты будешь писать новую логику:
-    // if (action == "win_game") { ... }
 }
 
-// --- Шаблон для "Сердцебиения" (Ticker) ---
-// Тебе нужно будет найти функцию в игре (например, Update или FixedUpdate),
-// которая вызывается постоянно, и повесить этот хук туда.
-// Без этого CommandManager не будет опрашивать очередь!
-/*
-void (*orig_GameUpdate)(void* instance);
-void H_GameUpdate(void* instance) {
-    if (orig_GameUpdate) orig_GameUpdate(instance); // Вызов оригинала
+// --- Хук на EventSystem.Update ---
+// Это метод класса, поэтому первый аргумент - this (instance)
+void (*orig_EventSystem_Update)(void* instance);
 
-    // Проверяем очередь команд
+void H_EventSystem_Update(void* instance) {
+    // 1. Обязательно вызываем оригинал, чтобы клики в игре работали!
+    if (orig_EventSystem_Update) {
+        orig_EventSystem_Update(instance);
+    }
+
+    // 2. Наша логика
+    // EventSystem.Update вызывается 1 раз за кадр движком Unity.
+    // Это идеальное место для нашего тикера.
+    
+    static int tickCounter = 0;
+    tickCounter++;
+    
+    // Для отладки: выводим лог раз в 600 кадров (примерно раз в 10 сек), 
+    // просто чтобы убедиться, что хук жив, не засоряя лог.
+    if (tickCounter % 600 == 0) {
+        LOGD("GameHooks: EventSystem Heartbeat is beating... ❤️");
+    }
+
+    // Обрабатываем очередь команд
     std::string actionToRun = CommandManager::Instance().ProcessQueue();
     if (!actionToRun.empty()) {
         ExecuteGameAction(actionToRun);
     }
 }
-*/
 
 // --- Установка ---
 void GameHooks::Install(uintptr_t baseAddress) {
     LOGI("GameHooks: Initialization started...");
 
-    // Пример установки хука (раскомментируешь, когда найдешь адрес в GameConfig):
-    // A64HookFunction((void*)(baseAddress + Config::RVA_UPDATE_FUNCTION), (void*)H_GameUpdate, (void**)&orig_GameUpdate);
+    void* targetAddr = (void*)(baseAddress + RVA_EVENTSYSTEM_UPDATE);
+    LOGD("GameHooks: Hooking EventSystem.Update at %p (RVA: 0x%X)", targetAddr, RVA_EVENTSYSTEM_UPDATE);
+
+    // Ставим хук
+    A64HookFunction(targetAddr, (void*)H_EventSystem_Update, (void**)&orig_EventSystem_Update);
     
-    LOGW("GameHooks: Hooks are currently EMPTY. Find a generic Update() RVA to drive the CommandManager.");
+    LOGI("GameHooks: EventSystem Hook installed. Waiting for UI loop...");
 }
