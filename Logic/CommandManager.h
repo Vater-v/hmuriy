@@ -6,10 +6,17 @@
 #include <chrono>
 #include <memory>
 
-// Конфигурация внутри хедера для простоты, либо вынести в Config.hpp
+// Конфигурация
 namespace CmdConfig {
     const int RETRY_INTERVAL_MS = 2000;
     const int MAX_RETRIES = 3;
+    
+    // Защита от дребезга (игнор дублей)
+    const int DEBOUNCE_MS = 1500; 
+    
+    // === НОВЫЕ ЗАДЕРЖКИ ===
+    const int DELAY_BEFORE_MS = 300; // Минимальная задержка "ПЕРЕД" отправкой (возраст команды)
+    const int DELAY_BETWEEN_MS = 300; // Минимальная пауза "МЕЖДУ" отправками
 }
 
 struct GameCommand {
@@ -17,13 +24,18 @@ struct GameCommand {
     bool executedLocally;       
     bool confirmedByServer;     
     int retryCount;             
-    std::chrono::steady_clock::time_point lastAttemptTime;
+    std::chrono::steady_clock::time_point enqueueTime; // Время добавления в очередь
 };
 
 class CommandManager {
 private:
     std::deque<GameCommand> queue;
     std::mutex mtx;
+
+    // --- DEBOUNCE & THROTTLE ---
+    std::string lastExecutedPayload;
+    std::chrono::steady_clock::time_point lastExecutionTime;  // Когда была последняя такая же команда (для debounce)
+    std::chrono::steady_clock::time_point lastGlobalSendTime; // Когда мы физически отправили любой пакет (для паузы между)
 
     // Singleton
     CommandManager() = default;
@@ -34,16 +46,11 @@ public:
     void operator=(const CommandManager&) = delete;
     static CommandManager& Instance();
 
-    // Добавить команду в очередь (вызывается из NetworkClient)
     void AddCommand(const std::string& cmdId);
-
-    // Подтвердить выполнение (вызывается из NetworkClient при получении ACK)
     void ConfirmSuccess(const std::string& receivedSuccessMsg);
-
     void AnalyzeGameResponse(const std::string& jsonResponse);
-
-    // Получить команду для исполнения (вызывается из Main Thread)
-    // Возвращает пустую строку, если команд нет или ждать рано
+    
+    // Возвращает команду только если прошли все таймеры
     std::string ProcessQueue();
     
     void Clear();

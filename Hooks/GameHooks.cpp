@@ -138,7 +138,8 @@ void SendDirectJson(const char* innerPayload) {
     std::string timestamp = GetCurrentTimeISO8601();
 
     // 5. Собираем ПОЛНЫЙ пакет
-    // Формат: {"id":5,"time":"...","type":"StageAction","payload":{...}}
+    // innerPayload здесь - это уже JSON объект от Python, например: {"stage":"GamePlay","action":"RollDice"}
+    // Мы вставляем его как ЗНАЧЕНИЕ поля "payload".
     std::stringstream ss;
     ss << "{\"id\":" << currentId 
        << ",\"time\":\"" << timestamp << "\""
@@ -182,27 +183,19 @@ void H_SocketBus_Ctor(void* instance, void* webSocket, void* queue, void* signal
 void H_Update(void* instance) {
     if (orig_Update) orig_Update(instance);
 
-    std::string cmd = CommandManager::Instance().ProcessQueue();
-    if (!cmd.empty()) {
-        LOGI("[MainThread] Executing command: %s", cmd.c_str());
+    // Забираем команду из очереди (которая пришла из Python после префикса API:)
+    // Теперь это чистый JSON (строка), который нужно отправить как payload.
+    std::string jsonPayload = CommandManager::Instance().ProcessQueue();
+    
+    if (!jsonPayload.empty()) {
+        LOGI("[MainThread] Processing API Payload from Python...");
+        LOGD("Payload content: %s", jsonPayload.c_str());
 
-        // --- ВАРИАНТЫ КОМАНД ---
-
-        if (cmd == "roll_dice") {
-            // Отправляем БРОСОК
-            const char* payload = "{\"stage\":\"GamePlay\",\"action\":\"RollDice\"}";
-            SendDirectJson(payload);
-        }
-        else if (cmd == "double_accept") {
-             // ПРИНЯТЬ УДВОЕНИЕ
-             const char* payload = "{\"stage\":\"GamePlay\",\"action\":\"DoublingAccept\"}";
-             SendDirectJson(payload);
-        }
-        else if (cmd == "double_reject") {
-             // X УДВОЕНИЕ
-             const char* payload = "{\"stage\":\"GamePlay\",\"action\":\"DoublingReject\"}";
-             SendDirectJson(payload);
-        }
+        // === FIRE & FORGET ===
+        // Мы больше не проверяем if (cmd == "roll"), мы просто отправляем то, 
+        // что прислал Python, внутрь обертки SendDirectJson.
+        // C++ отвечает за транспорт (ID, Time, WebSocket), Python за логику (Action, Stage).
+        SendDirectJson(jsonPayload.c_str());
     }
 }
 
@@ -234,7 +227,7 @@ void* H_DeserializeObject(void* str, void* type, void* settings) {
     return orig_DeserializeObject(str, type, settings);
 }
 
-// Оставляем старый хук для стаканчика (на всякий случай)
+// Оставляем старый хук для стаканчика (на всякий случай, может пригодиться)
 void H_CupController_Ctor(void* instance, void* board, void* cmd) {
     g_CupControllerInstance = instance;
     if (orig_CupController_Ctor) orig_CupController_Ctor(instance, board, cmd);
@@ -259,9 +252,11 @@ void GameHooks::Install(uintptr_t baseAddress) {
     A64HookFunction((void*)(baseAddress + Config::RVA_UPDATE_FUNC), (void*)H_Update, (void**)&orig_Update);
     A64HookFunction((void*)(baseAddress + Config::RVA_SERIALIZE), (void*)H_SerializeObject, (void**)&orig_SerializeObject);
     A64HookFunction((void*)(baseAddress + Config::RVA_DESERIALIZE), (void*)H_DeserializeObject, (void**)&orig_DeserializeObject);
+    
+    // Хук стаканчика, возможно, больше не нужен для действия, но оставим для instance
     A64HookFunction((void*)(baseAddress + Config::RVA_CUP_CTOR), (void*)H_CupController_Ctor, (void**)&orig_CupController_Ctor);
     
-    // Перехват SocketBus
+    // Перехват SocketBus (КРИТИЧНО для отправки)
     A64HookFunction((void*)(baseAddress + Config::RVA_SOCKETBUS_CTOR), (void*)H_SocketBus_Ctor, (void**)&orig_SocketBus_Ctor);
 
     // 3. Сохраняем адреса для прямых вызовов
