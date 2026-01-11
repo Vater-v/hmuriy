@@ -12,6 +12,7 @@
 #include <chrono>  // Для времени
 #include <ctime>   // Для gmtime
 #include <dlfcn.h> // Для dlsym
+#include <deque>   // Для очереди сообщений
 
 // =============================================================
 // ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
@@ -19,6 +20,22 @@
 
 void* g_CupControllerInstance = nullptr;
 void* g_SocketBusInstance = nullptr;    
+
+// --- Очередь отправки (Smart Debounce / Burst Mode) ---
+std::deque<std::string> g_SendQueue;
+std::chrono::steady_clock::time_point g_LastSendTime = std::chrono::steady_clock::now();
+
+// --- Настройки Burst Mode (Взрывной серии) ---
+// Разрешаем отправить до 8 пакетов почти мгновенно.
+// Это покрывает большинство игровых ситуаций (активный ход).
+const int BURST_LIMIT = 8; 
+int g_CurrentBurstCount = 0;
+std::chrono::steady_clock::time_point g_LastBurstResetTime = std::chrono::steady_clock::now();
+
+// Задержки
+const int DELAY_FAST_MS = 40;   // 40мс - быстрая отправка (в пределах лимита)
+const int DELAY_SLOW_MS = 350;  // 350мс - защита от спама (если лимит превышен)
+const int BURST_RESET_MS = 1200; // Сброс счетчика серии через 1.2 сек тишины
 
 // =============================================================
 // ОПРЕДЕЛЕНИЕ ТИПОВ ФУНКЦИЙ
@@ -134,12 +151,10 @@ void SendDirectJson(const char* innerPayload) {
     *pIdCounter = *pIdCounter + 1;
     int currentId = *pIdCounter;
 
-    // 4. Генерируем время
+    // 4. Генерируем время (оно будет актуальным на момент фактической отправки)
     std::string timestamp = GetCurrentTimeISO8601();
 
     // 5. Собираем ПОЛНЫЙ пакет
-    // innerPayload здесь - это уже JSON объект от Python, например: {"stage":"GamePlay","action":"RollDice"}
-    // Мы вставляем его как ЗНАЧЕНИЕ поля "payload".
     std::stringstream ss;
     ss << "{\"id\":" << currentId 
        << ",\"time\":\"" << timestamp << "\""
@@ -158,8 +173,6 @@ void SendDirectJson(const char* innerPayload) {
     // 7. Отправляем через WebSocket.SendText
     LOGW("GameHooks: >>> SENDING PACKET ID [%d]: %s", currentId, fullPacket.c_str());
     func_SendText(webSocketInstance, il2cppStr);
-    
-    NetworkClient::Instance().SendToast("Packet " + std::to_string(currentId) + " Sent!");
 }
 
 // =============================================================
@@ -171,31 +184,57 @@ void H_SocketBus_Ctor(void* instance, void* webSocket, void* queue, void* signal
     g_SocketBusInstance = instance;
     LOGI("GameHooks: Captured SocketBus instance: %p", instance);
     
-    // Для отладки покажем текущий ID
-    int currentId = *(int*)((uintptr_t)instance + Config::OFFSET_SOCKETBUS_ID);
-    LOGI("GameHooks: Current SocketBus ID is: %d", currentId);
-
     if (orig_SocketBus_Ctor) {
         orig_SocketBus_Ctor(instance, webSocket, queue, signal, log);
     }
 }
 
+// ОСНОВНОЙ ЦИКЛ (UPDATE) - SMART BURST LOGIC
 void H_Update(void* instance) {
     if (orig_Update) orig_Update(instance);
 
-    // Забираем команду из очереди (которая пришла из Python после префикса API:)
-    // Теперь это чистый JSON (строка), который нужно отправить как payload.
-    std::string jsonPayload = CommandManager::Instance().ProcessQueue();
-    
-    if (!jsonPayload.empty()) {
-        LOGI("[MainThread] Processing API Payload from Python...");
-        LOGD("Payload content: %s", jsonPayload.c_str());
+    // 1. Забираем ВСЕ команды из CommandManager
+    // Мы НЕ проверяем дубликаты здесь, как и требовалось.
+    while(true) {
+        std::string jsonPayload = CommandManager::Instance().ProcessQueue();
+        if (jsonPayload.empty()) break;
+        
+        LOGI("[MainThread] Queuing API Payload: %s", jsonPayload.c_str());
+        g_SendQueue.push_back(jsonPayload);
+    }
 
-        // === FIRE & FORGET ===
-        // Мы больше не проверяем if (cmd == "roll"), мы просто отправляем то, 
-        // что прислал Python, внутрь обертки SendDirectJson.
-        // C++ отвечает за транспорт (ID, Time, WebSocket), Python за логику (Action, Stage).
-        SendDirectJson(jsonPayload.c_str());
+    // 2. Обработка очереди с умной задержкой
+    if (!g_SendQueue.empty()) {
+        auto now = std::chrono::steady_clock::now();
+        
+        // А. Проверяем, сколько времени прошло с последнего сброса серии
+        // Если была пауза > 1.2 сек, считаем, что игрок начал новую серию действий
+        auto timeSinceBurstReset = std::chrono::duration_cast<std::chrono::milliseconds>(now - g_LastBurstResetTime).count();
+        if (timeSinceBurstReset > BURST_RESET_MS) {
+            g_CurrentBurstCount = 0; // Сброс счетчика
+            g_LastBurstResetTime = now;
+        }
+
+        // Б. Определяем задержку
+        // Если количество действий в серии меньше 8 -> задержка 40мс
+        // Если больше 8 -> включаем троттлинг 350мс
+        int currentRequiredDelay = (g_CurrentBurstCount < BURST_LIMIT) ? DELAY_FAST_MS : DELAY_SLOW_MS;
+
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - g_LastSendTime).count();
+
+        if (elapsed >= currentRequiredDelay) {
+            // Время пришло
+            std::string payloadToSend = g_SendQueue.front();
+            g_SendQueue.pop_front();
+
+            // Отправляем
+            SendDirectJson(payloadToSend.c_str());
+
+            // Обновляем состояние
+            g_LastSendTime = now;
+            g_LastBurstResetTime = now; // Сбрасываем таймер простоя, так как мы активны
+            g_CurrentBurstCount++;      // Увеличиваем счетчик серии
+        }
     }
 }
 
@@ -206,7 +245,6 @@ void* H_SerializeObject(void* value) {
         std::string s = ReadIl2CppString(res);
         if (!Utils::IsSpamOrIgnored(s)) {
             if (NetworkClient::Instance().IsConnected()) {
-                // Шлем на сервер "как есть", чтобы видеть структуру
                 NetworkClient::Instance().SendRaw("OUT: " + Utils::SmartMinify(s));
             }
         }
@@ -227,7 +265,7 @@ void* H_DeserializeObject(void* str, void* type, void* settings) {
     return orig_DeserializeObject(str, type, settings);
 }
 
-// Оставляем старый хук для стаканчика (на всякий случай, может пригодиться)
+// Хук стаканчика
 void H_CupController_Ctor(void* instance, void* board, void* cmd) {
     g_CupControllerInstance = instance;
     if (orig_CupController_Ctor) orig_CupController_Ctor(instance, board, cmd);
@@ -253,15 +291,12 @@ void GameHooks::Install(uintptr_t baseAddress) {
     A64HookFunction((void*)(baseAddress + Config::RVA_SERIALIZE), (void*)H_SerializeObject, (void**)&orig_SerializeObject);
     A64HookFunction((void*)(baseAddress + Config::RVA_DESERIALIZE), (void*)H_DeserializeObject, (void**)&orig_DeserializeObject);
     
-    // Хук стаканчика, возможно, больше не нужен для действия, но оставим для instance
     A64HookFunction((void*)(baseAddress + Config::RVA_CUP_CTOR), (void*)H_CupController_Ctor, (void**)&orig_CupController_Ctor);
-    
-    // Перехват SocketBus (КРИТИЧНО для отправки)
     A64HookFunction((void*)(baseAddress + Config::RVA_SOCKETBUS_CTOR), (void*)H_SocketBus_Ctor, (void**)&orig_SocketBus_Ctor);
 
     // 3. Сохраняем адреса для прямых вызовов
     func_CupController_Roll = (CupController_Roll_t)(baseAddress + Config::RVA_ROLL_METHOD);
     func_SendText = (WebSocket_SendText_t)(baseAddress + Config::RVA_WEBSOCKET_SENDTEXT);
 
-    LOGI("GameHooks: Hooks installed. Waiting for game start...");
+    LOGI("GameHooks: Hooks installed with Burst Queue System (Limit: 8).");
 }
