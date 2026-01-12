@@ -2,7 +2,7 @@
 setlocal enabledelayedexpansion
 
 :: ==========================================
-::               НАСТРОЙКИ
+::                НАСТРОЙКИ
 :: ==========================================
 
 :: 1. Основные пути
@@ -11,6 +11,9 @@ set "PROJECT_SOURCE=%ROOT_DIR%\hmuriy"
 set "UNPACKED_DIR=%ROOT_DIR%\unpacked_project"
 set "NDK_PATH=C:\android-ndk-r29"
 
+:: Путь к итоговому файлу (рядом с батником)
+set "FINAL_BUILD_PATH=%~dp0build.apk"
+
 :: 2. Инструменты (лежат в C:\valera)
 set "APKTOOL_JAR=%ROOT_DIR%\apktool.jar"
 set "SIGNER_JAR=%ROOT_DIR%\uber-apk-signer.jar"
@@ -18,13 +21,13 @@ set "SIGNER_JAR=%ROOT_DIR%\uber-apk-signer.jar"
 :: 3. Названия файлов
 set "LIB_NAME=libhmuriy.so"
 set "UNSIGNED_APK=%ROOT_DIR%\temp_unsigned.apk"
-set "FINAL_APK_DIR=%ROOT_DIR%\release_out"
+set "TEMP_OUT_DIR=%ROOT_DIR%\release_out"
 
 :: 4. Папка сборки CMake
 set "BUILD_DIR=%PROJECT_SOURCE%\build"
 
 :: ==========================================
-::               ПРОВЕРКИ
+::                ПРОВЕРКИ
 :: ==========================================
 
 if not exist "%NDK_PATH%" (
@@ -110,32 +113,43 @@ if %errorlevel% neq 0 (
 )
 
 :: ==========================================
-:: ШАГ 4: Подпись APK (Uber Apk Signer)
+:: ШАГ 4: Подпись APK и сохранение как build.apk
 :: ==========================================
 echo.
-echo [STEP 4/5] Signing APK...
+echo [STEP 4/5] Signing APK and saving as build.apk...
 echo ------------------------------------------
 
-:: Очищаем папку вывода перед подписью
-if exist "%FINAL_APK_DIR%" rd /s /q "%FINAL_APK_DIR%"
-mkdir "%FINAL_APK_DIR%"
+:: Очищаем временную папку вывода перед подписью
+if exist "%TEMP_OUT_DIR%" rd /s /q "%TEMP_OUT_DIR%"
+mkdir "%TEMP_OUT_DIR%"
 
-:: ИСПРАВЛЕНИЕ: Убран флаг --overwrite, так как есть --out
-java -jar "%SIGNER_JAR%" --apks "%UNSIGNED_APK%" --out "%FINAL_APK_DIR%"
+:: Подписываем во временную папку
+java -jar "%SIGNER_JAR%" --apks "%UNSIGNED_APK%" --out "%TEMP_OUT_DIR%"
 
 if %errorlevel% neq 0 (
     echo [ERROR] Signing failed.
     goto :Error
 )
 
-:: Находим подписанный файл (имя может меняться, ищем первый apk в папке вывода)
-for %%f in ("%FINAL_APK_DIR%\*.apk") do set "SIGNED_APK=%%f"
+:: Находим подписанный файл во временной папке
+set "TEMP_SIGNED_APK="
+for %%f in ("%TEMP_OUT_DIR%\*.apk") do set "TEMP_SIGNED_APK=%%f"
 
-if not defined SIGNED_APK (
+if not defined TEMP_SIGNED_APK (
     echo [ERROR] Signed APK not found in output directory.
     goto :Error
 )
-echo [INFO] Signed APK ready: %SIGNED_APK%
+
+:: Перемещаем и переименовываем файл рядом с батником
+echo Moving "%TEMP_SIGNED_APK%" to "%FINAL_BUILD_PATH%"
+move /Y "%TEMP_SIGNED_APK%" "%FINAL_BUILD_PATH%" >nul
+
+if not exist "%FINAL_BUILD_PATH%" (
+    echo [ERROR] Failed to move file to build.apk
+    goto :Error
+)
+
+echo [INFO] Final APK ready: %FINAL_BUILD_PATH%
 
 :: ==========================================
 :: ШАГ 5: Установка через ADB
@@ -144,7 +158,7 @@ echo.
 echo [STEP 5/5] Installing via ADB...
 echo ------------------------------------------
 
-adb install -r "%SIGNED_APK%"
+adb install -r "%FINAL_BUILD_PATH%"
 if %errorlevel% neq 0 (
     echo [ERROR] ADB Install failed. Check if device is connected and debugging is on.
     goto :Error
@@ -160,10 +174,13 @@ echo [CLEANUP] Removing temporary files...
 if exist "%BUILD_DIR%" rd /s /q "%BUILD_DIR%"
 :: Удаляем неподписанный APK
 if exist "%UNSIGNED_APK%" del "%UNSIGNED_APK%"
+:: Удаляем временную папку Uber Signer (так как файл мы забрали)
+if exist "%TEMP_OUT_DIR%" rd /s /q "%TEMP_OUT_DIR%"
 
 echo.
 echo ==========================================
 echo [SUCCESS] Pipeline completed successfully!
+echo File location: %FINAL_BUILD_PATH%
 echo ==========================================
 pause
 exit /b 0
