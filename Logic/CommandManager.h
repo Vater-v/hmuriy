@@ -12,7 +12,7 @@ namespace CmdConfig {
     const int MAX_RETRIES = 3;
     
     // Защита от дребезга (игнор дублей)
-    const int DEBOUNCE_MS = 1500; 
+    const int DEBOUNCE_MS = 350; 
     
     // === НОВЫЕ ЗАДЕРЖКИ ===
     const int DELAY_BEFORE_MS = 300; // Минимальная задержка "ПЕРЕД" отправкой (возраст команды)
